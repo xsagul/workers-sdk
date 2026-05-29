@@ -10,6 +10,8 @@ import {
 } from "@cloudflare/workers-utils";
 import chalk from "chalk";
 import PQueue from "p-queue";
+import { diffJsonObjects } from "../deploy/helpers/diff-json";
+import { fetchWorkerConfig } from "../deploy/helpers/download-worker-config";
 import {
 	WORKFLOW_CRON_REQUIRES_PAID_PLAN_CODE,
 	WORKFLOW_JURISDICTION_IMMUTABLE_CODE,
@@ -33,8 +35,13 @@ import {
 } from "./queue-consumers";
 import { getWorkerSubdomain, getWorkersDevSubdomain } from "./subdomain";
 import { getZoneForRoute } from "./zones";
+import type { JsonLike } from "../deploy/helpers/diff-json";
 import type { TriggerDeployment, TriggerProps } from "../shared/types";
-import type { Config, Route } from "@cloudflare/workers-utils";
+import type {
+	Config,
+	CustomDomainRoute,
+	Route,
+} from "@cloudflare/workers-utils";
 
 export const PREVIEW_DOMAIN_PROVISIONING_NOTE =
 	"Note: DNS and TLS certificate provisioning for Preview domains may continue after this deploy. If a new Preview URL does not work immediately, wait a few minutes and retry.";
@@ -49,13 +56,27 @@ export async function triggersDeploy(
 		validateOwnedWorkflowDeclarations(config, scriptName);
 	}
 
-	if (props.dryRun) {
+	if (props.dryRun && !props.showDiff) {
 		logger.log(`--dry-run: exiting now.`);
 		return;
 	}
 
 	const { accountId } = props;
 	assert(accountId);
+
+	const { routesOnly, customDomainsOnly } = partitionRoutes(routes);
+	const remoteTriggersSnapshot = props.showDiff
+		? await fetchRemoteTriggers(config, accountId, scriptName)
+		: undefined;
+
+	if (props.dryRun) {
+		displayTriggerDiff(
+			remoteTriggersSnapshot,
+			buildLocalTriggers(config, routes, routesOnly, customDomainsOnly, crons)
+		);
+		logger.log(`--dry-run: exiting now.`);
+		return;
+	}
 
 	if (props.validated !== true) {
 		await ensureQueuesExistByConfig(
@@ -66,8 +87,6 @@ export async function triggersDeploy(
 			props.queueCreateCommand
 		);
 	}
-
-	const { routesOnly, customDomainsOnly } = partitionRoutes(routes);
 
 	const start = Date.now();
 
@@ -614,7 +633,169 @@ export async function triggersDeploy(
 		);
 	}
 
+	if (props.showDiff) {
+		displayTriggerDiff(
+			remoteTriggersSnapshot,
+			buildLocalTriggers(config, routes, routesOnly, customDomainsOnly, crons)
+		);
+	}
+
 	return targets;
+}
+
+/**
+ * Normalizes a route for comparison, excluding API-only fields.
+ */
+function normalizeRoute(route: Route): Record<string, JsonLike> {
+	if (typeof route === "string") {
+		return { pattern: route };
+	}
+	const normalized: Record<string, JsonLike> = { pattern: route.pattern };
+	if ("zone_name" in route && route.zone_name) {
+		normalized.zone_name = route.zone_name;
+	}
+	if ("zone_id" in route && route.zone_id) {
+		normalized.zone_id = route.zone_id;
+	}
+	if (route.custom_domain) {
+		normalized.custom_domain = true;
+	}
+	return normalized;
+}
+
+/**
+ * Builds the normalized local trigger configuration to compare with the remote.
+ */
+function buildLocalTriggers(
+	config: Config,
+	routes: Route[],
+	routesOnly: Route[],
+	customDomainsOnly: CustomDomainRoute[],
+	crons: string[] | undefined
+): Record<string, JsonLike> {
+	const { workers_dev, preview_urls } = getSubdomainValuesAPIMock(
+		config.workers_dev,
+		config.preview_urls,
+		routes
+	);
+	const triggers: Record<string, JsonLike> = { workers_dev, preview_urls };
+
+	const normalizedRoutes = routesOnly
+		.map(normalizeRoute)
+		.sort((firstRoute, secondRoute) =>
+			String(firstRoute.pattern ?? "").localeCompare(
+				String(secondRoute.pattern ?? "")
+			)
+		);
+	if (normalizedRoutes.length > 0) {
+		triggers.routes = normalizedRoutes;
+	}
+
+	const normalizedCustomDomains = customDomainsOnly
+		.map(normalizeRoute)
+		.sort((firstRoute, secondRoute) =>
+			String(firstRoute.pattern ?? "").localeCompare(
+				String(secondRoute.pattern ?? "")
+			)
+		);
+	if (normalizedCustomDomains.length > 0) {
+		triggers.custom_domains = normalizedCustomDomains;
+	}
+
+	if (crons && crons.length > 0) {
+		triggers.crons = [...crons].sort();
+	}
+
+	return triggers;
+}
+
+/**
+ * Fetches and normalizes the deployed routes, domains, crons and subdomain settings.
+ */
+async function fetchRemoteTriggers(
+	config: Config,
+	accountId: string,
+	workerName: string
+): Promise<Record<string, JsonLike>> {
+	const { routes, customDomains, subdomainStatus, cronTriggers } =
+		await fetchWorkerConfig(
+			config,
+			accountId,
+			workerName,
+			"production",
+			true,
+			true
+		);
+
+	const triggers: Record<string, JsonLike> = {
+		workers_dev: subdomainStatus.enabled,
+		preview_urls: subdomainStatus.previews_enabled,
+	};
+
+	const normalizedRoutes = routes
+		.map((route) => {
+			const normalized: Record<string, JsonLike> = { pattern: route.pattern };
+			if (route.zone_name) {
+				normalized.zone_name = route.zone_name;
+			}
+			return normalized;
+		})
+		.sort((firstRoute, secondRoute) =>
+			String(firstRoute.pattern ?? "").localeCompare(
+				String(secondRoute.pattern ?? "")
+			)
+		);
+	if (normalizedRoutes.length > 0) {
+		triggers.routes = normalizedRoutes;
+	}
+
+	const normalizedCustomDomains = customDomains
+		.map((domain) => {
+			const normalized: Record<string, JsonLike> = { pattern: domain.hostname };
+			if (domain.zone_name) {
+				normalized.zone_name = domain.zone_name;
+			}
+			normalized.custom_domain = true;
+			return normalized;
+		})
+		.sort((firstRoute, secondRoute) =>
+			String(firstRoute.pattern ?? "").localeCompare(
+				String(secondRoute.pattern ?? "")
+			)
+		);
+	if (normalizedCustomDomains.length > 0) {
+		triggers.custom_domains = normalizedCustomDomains;
+	}
+
+	const crons = cronTriggers.schedules.map((schedule) => schedule.cron).sort();
+	if (crons.length > 0) {
+		triggers.crons = crons;
+	}
+
+	return triggers;
+}
+
+/**
+ * Displays the differences between the deployed and local trigger configurations.
+ */
+function displayTriggerDiff(
+	remoteTriggers: Record<string, JsonLike> | undefined,
+	localTriggers: Record<string, JsonLike>
+): void {
+	if (!remoteTriggers) {
+		return;
+	}
+
+	const diff = diffJsonObjects(remoteTriggers, localTriggers);
+
+	logger.log("");
+	if (diff) {
+		logger.log(
+			`Trigger changes (remote ${chalk.red("\u2192")} local):\n${diff}`
+		);
+	} else {
+		logger.log("No trigger changes detected.");
+	}
 }
 
 /**
