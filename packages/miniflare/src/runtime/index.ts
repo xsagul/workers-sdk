@@ -40,6 +40,7 @@ export interface RuntimeOptions {
 	entryAddress: string;
 	loopbackAddress: string;
 	requiredSockets: SocketIdentifier[];
+	socketAddresses?: Record<string, string>;
 	inspectorAddress?: string;
 	debugPortAddress?: string;
 	verbose?: boolean;
@@ -235,9 +236,15 @@ class StartupLogBuffer {
 					? undefined
 					: (socketAddresses[socket] ?? `socket "${socket}"`));
 			const where = address === undefined ? "" : ` (${address})`;
+			const isAuxiliarySocket =
+				socket !== undefined &&
+				(socket.startsWith("direct:") || socket.startsWith("connect:"));
+			const portHint = isAuxiliarySocket
+				? ""
+				: " or specify a different port with --port";
 			throw new MiniflareCoreError(
 				"ERR_ADDRESS_IN_USE",
-				`Address already in use${where}. Please check that you are not already running a server on this address or specify a different port with --port.`
+				`Address already in use${where}. Please check that you are not already running a server on this address${portHint}.`
 			);
 		}
 
@@ -367,6 +374,7 @@ export class Runtime {
 
 		if (ports === undefined && !abortSignal.aborted) {
 			startupLogBuffer.handleStartupFailure({
+				...options.socketAddresses,
 				[SOCKET_ENTRY]: options.entryAddress,
 			});
 		} else {

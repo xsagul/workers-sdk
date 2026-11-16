@@ -2752,11 +2752,18 @@ export class Miniflare {
 		// Switch sessions only once the old workerd has stopped, so that a
 		// failure above leaves the running process's session tracked.
 		this.#containerSession = containerSession.session;
+		const socketAddresses: Record<string, string> = {};
+		for (const socket of config.sockets) {
+			if (socket.name !== undefined && socket.address !== undefined) {
+				socketAddresses[socket.name] = socket.address;
+			}
+		}
 		const runtimeOpts: Abortable & RuntimeOptions = {
 			signal: this.#disposeController.signal,
 			entryAddress,
 			loopbackAddress,
 			requiredSockets,
+			socketAddresses,
 			inspectorAddress: runtimeInspectorAddress,
 			debugPortAddress: this.#devRegistry.isEnabled()
 				? "127.0.0.1:0"

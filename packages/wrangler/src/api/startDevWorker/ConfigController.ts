@@ -865,10 +865,14 @@ export class ConfigController extends Controller {
 			if (signal.aborted) {
 				return;
 			}
+			const inspectorPortAutoSelected =
+				input.dev?.inspector !== false &&
+				input.dev?.inspector?.port === undefined &&
+				fileConfig.dev.inspector_port === undefined;
 			this.latestWranglerConfig = fileConfig;
 			this.latestConfig = resolvedConfig;
 			this.#printCurrentBindings = printCurrentBindings;
-			this.emitConfigUpdateEvent(resolvedConfig);
+			this.emitConfigUpdateEvent(resolvedConfig, inspectorPortAutoSelected);
 
 			return this.latestConfig;
 		} catch (err) {
@@ -919,7 +923,14 @@ export class ConfigController extends Controller {
 	//   Event Dispatchers
 	// *********************
 
-	emitConfigUpdateEvent(config: StartDevWorkerOptions) {
-		this.bus.dispatch({ type: "configUpdate", config });
+	emitConfigUpdateEvent(
+		config: StartDevWorkerOptions,
+		inspectorPortAutoSelected?: boolean
+	) {
+		this.bus.dispatch({
+			type: "configUpdate",
+			config,
+			inspectorPortAutoSelected,
+		});
 	}
 }

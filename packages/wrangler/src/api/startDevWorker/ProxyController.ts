@@ -7,6 +7,7 @@ import {
 	convertV4MiniflareOptions,
 	LogLevel,
 	Miniflare,
+	MiniflareCoreError,
 	Mutex,
 	Response,
 } from "miniflare";
@@ -181,7 +182,10 @@ export class ProxyController extends Controller {
 				unsafeDirectSockets: [
 					{
 						host: this.latestConfig.dev?.inspector?.hostname,
-						port: this.latestConfig.dev?.inspector?.port ?? 0,
+						port:
+							this.autoSelectedInspectorPortOverride ??
+							this.latestConfig.dev?.inspector?.port ??
+							0,
 					},
 				],
 				// no need to use file-system, so don't
@@ -205,9 +209,17 @@ export class ProxyController extends Controller {
 		if (proxyWorkerOptionsChanged) {
 			logger.debug("ProxyWorker miniflare options changed, reinstantiating...");
 
+			const currentProxyWorker = this.proxyWorker;
 			void this.proxyWorker
 				.setOptions(convertV4MiniflareOptions(proxyWorkerOptions))
 				.catch((error) => {
+					if (this.shouldRetryInspectorPort(error, currentProxyWorker)) {
+						void this.retryWithEphemeralInspectorPort(currentProxyWorker);
+						return;
+					}
+					if (this._torndown || this.proxyWorker !== currentProxyWorker) {
+						return;
+					}
 					this.emitErrorEvent("Failed to start ProxyWorker", error);
 				});
 
@@ -244,7 +256,11 @@ export class ProxyController extends Controller {
 					this.emitReadyEvent(proxyWorker, url, inspectorUrl);
 				})
 				.catch((error) => {
-					if (this._torndown) {
+					if (this.shouldRetryInspectorPort(error, proxyWorker)) {
+						void this.retryWithEphemeralInspectorPort(proxyWorker);
+						return;
+					}
+					if (this._torndown || this.proxyWorker !== proxyWorker) {
 						return;
 					}
 					this.emitErrorEvent(
@@ -332,6 +348,53 @@ export class ProxyController extends Controller {
 		this.inspectorProxyWorkerWebSocket?.resolve(webSocket);
 
 		return webSocket;
+	}
+
+	private inspectorPortAutoSelected = false;
+	private autoSelectedInspectorPortOverride?: number;
+	private conflictedAutoSelectedInspectorPort?: number;
+
+	private shouldRetryInspectorPort(
+		cause: unknown,
+		proxyWorker: Miniflare
+	): boolean {
+		if (
+			this._torndown ||
+			this.proxyWorker !== proxyWorker ||
+			!this.inspectorPortAutoSelected ||
+			this.autoSelectedInspectorPortOverride === 0
+		) {
+			return false;
+		}
+		const error = castErrorCause(cause);
+		return (
+			error instanceof MiniflareCoreError &&
+			error.code === "ERR_ADDRESS_IN_USE" &&
+			!error.message.includes("--port")
+		);
+	}
+
+	private async retryWithEphemeralInspectorPort(
+		failedProxyWorker: Miniflare
+	): Promise<void> {
+		if (this._torndown || this.proxyWorker !== failedProxyWorker) {
+			return;
+		}
+		const configuredPort =
+			typeof this.latestConfig?.dev?.inspector === "object"
+				? this.latestConfig.dev.inspector.port
+				: undefined;
+		this.conflictedAutoSelectedInspectorPort = configuredPort;
+		this.autoSelectedInspectorPortOverride = 0;
+		this.proxyWorker = undefined;
+		this.proxyWorkerOptions = undefined;
+		logger.debug(
+			`Auto-selected inspector port ${configuredPort ?? "default"} is already in use; retrying with an ephemeral port`
+		);
+		await failedProxyWorker.dispose().catch(() => undefined);
+		if (!this._torndown && this.proxyWorker === undefined) {
+			this.createProxyWorker();
+		}
 	}
 
 	runtimeMessageMutex = new Mutex();
@@ -440,6 +503,18 @@ export class ProxyController extends Controller {
 
 	onConfigUpdate(data: ConfigUpdateEvent) {
 		this.latestConfig = data.config;
+		this.inspectorPortAutoSelected = Boolean(data.inspectorPortAutoSelected);
+		const configuredPort =
+			typeof data.config.dev.inspector === "object"
+				? data.config.dev.inspector.port
+				: undefined;
+		if (
+			!this.inspectorPortAutoSelected ||
+			configuredPort !== this.conflictedAutoSelectedInspectorPort
+		) {
+			this.autoSelectedInspectorPortOverride = undefined;
+			this.conflictedAutoSelectedInspectorPort = undefined;
+		}
 		this.createProxyWorker();
 
 		void this.sendMessageToProxyWorker({ type: "pause" });

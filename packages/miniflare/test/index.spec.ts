@@ -5542,3 +5542,42 @@ test("Miniflare: dispatchFetch() replays a known-length body after HTTP 421", as
 	expect(res.headers.get("location")).toBeNull();
 	expect(await res.text()).toBe("body={}");
 });
+
+test("Miniflare: reports direct socket address on ERR_ADDRESS_IN_USE without suggesting --port", async ({
+	expect,
+	onTestFinished,
+}) => {
+	const server = net.createServer();
+	await new Promise<void>((resolve) => {
+		server.listen(0, "127.0.0.1", () => resolve());
+	});
+	onTestFinished(
+		() => new Promise<void>((resolve) => server.close(() => resolve()))
+	);
+	const { port } = server.address() as AddressInfo;
+
+	const mf = new Miniflare({
+		workers: [
+			{
+				config: {
+					name: "",
+					compatibilityDate: "2025-05-01",
+					manifest: singleModuleManifest(`export default {
+			fetch() {
+				return new Response("ok");
+			}
+		}`),
+				},
+				dev: {
+					unsafeDirectSockets: [{ host: "127.0.0.1", port }],
+				},
+			},
+		],
+	});
+	onTestFinished(() => mf.dispose().catch(() => {}));
+
+	await expect(mf.ready).rejects.toMatchObject({
+		code: "ERR_ADDRESS_IN_USE",
+		message: `Address already in use (127.0.0.1:${port}). Please check that you are not already running a server on this address.`,
+	});
+});

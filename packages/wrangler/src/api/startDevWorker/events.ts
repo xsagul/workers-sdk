@@ -87,6 +87,7 @@ export type ConfigUpdateEvent = {
 	type: "configUpdate";
 
 	config: StartDevWorkerOptions;
+	inspectorPortAutoSelected?: boolean;
 };
 
 // BundlerController
