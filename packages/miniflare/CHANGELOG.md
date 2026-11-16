@@ -1,5 +1,13 @@
 # miniflare
 
+## 5.20261116.1-beta
+
+### Patch Changes
+
+- [#16811](https://github.com/cloudflare/workers-sdk/pull/16811) [`51064e6`](https://github.com/cloudflare/workers-sdk/commit/51064e6d4fa630d950fb0544fda07efd877dd2fb) Thanks [@mindulle](https://github.com/mindulle)! - Expose `canBeForwarded` boolean property on `ForwardableEmailMessage` in email handler
+
+  Previously, in `wrangler dev`, the `ForwardableEmailMessage` passed to a Worker's `email()` handler did not expose the documented `canBeForwarded` property, causing it to read as `undefined` locally while production exposes it as a read-only boolean. `canBeForwarded: true` is now set on the incoming message object in Miniflare, matching production behavior.
+
 ## 5.20261116.0-beta
 
 ### Minor Changes
